@@ -1,0 +1,8 @@
+gymnasium==1.2.3
+matplotlib==3.10.8
+networkx==3.6.1
+numpy==2.4.1
+scipy==1.17.0
+topohub==1.5.1
+geopy==2.4.1
+geographiclib==2.1
