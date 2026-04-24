@@ -17,6 +17,7 @@ os.chdir(BASE_DIR)
 from env.constants import EVAL_SEEDS
 from env.entanglementenv import EntanglementEnv
 from env.quantum_network import QuantumNetwork
+from visualization import visualize_environment
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -264,7 +265,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--save-plot",
         type=Path,
         default=None,
-        help="Save the generated network topology image to this path.",
+        help="Save a visualization of the generated network environment to this path.",
+    )
+    parser.add_argument(
+        "--show-plot",
+        action="store_true",
+        help="Show the generated network environment visualization.",
+    )
+    parser.add_argument(
+        "--no-node-labels",
+        action="store_true",
+        help="Hide node ids in the saved environment visualization.",
     )
     parser.add_argument(
         "--summary-json",
@@ -385,9 +396,21 @@ def main() -> int:
 
     if args.save_plot is not None:
         plot_path = args.save_plot.resolve()
-        plot_path.parent.mkdir(parents=True, exist_ok=True)
-        env.network.render(show_plot=False, filename=str(plot_path))
+        visualize_environment(
+            env,
+            filename=plot_path,
+            show_plot=args.show_plot,
+            title=f"Quantum Network Environment (seed={summary['topology_seed']})",
+            label_nodes=not args.no_node_labels,
+        )
         summary["topology_plot"] = str(plot_path)
+    elif args.show_plot:
+        visualize_environment(
+            env,
+            show_plot=True,
+            title=f"Quantum Network Environment (seed={summary['topology_seed']})",
+            label_nodes=not args.no_node_labels,
+        )
 
     if args.summary_json is not None:
         json_path = args.summary_json.resolve()
