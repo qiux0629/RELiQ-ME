@@ -1383,6 +1383,24 @@ class QuantumNetwork:
             nx.shortest_path_length(self.G, weight=self.get_edge_weight_binary)
         )
 
+    def update_shortest_available_paths(self):
+        """
+        Calculates shortest paths over edges that currently have usable quantum links.
+        """
+        available_graph = self.G.copy()
+        for edge in self.edges:
+            available_links = len(edge.links) - edge.get_total_reservations()
+            if edge.dead or available_links <= 0:
+                if available_graph.has_edge(edge.start, edge.end):
+                    available_graph.remove_edge(edge.start, edge.end)
+
+        self.shortest_available_paths = dict(
+            nx.shortest_path(available_graph, weight=self.get_edge_weight_binary)
+        )
+        self.shortest_available_paths_weights = dict(
+            nx.shortest_path_length(available_graph, weight=self.get_edge_weight_binary)
+        )
+
     def get_path_length(self, start, end, edge_attributes=None):
         return self.get_node_distance(self.nodes[start], self.nodes[end])
 
@@ -1505,6 +1523,7 @@ class QuantumNetwork:
 
         if nx.is_connected(self.G):
             self.diameter = nx.diameter(self.G)
+        self.update_shortest_available_paths()
 
     def render(self, G=None, show_plot=True, filename=None, fig=None, ax=None, fancy=False, starts=None, targets=None, positions=None):
         if G is None:
@@ -1653,6 +1672,7 @@ class QuantumNetwork:
         self._refresh_quantum_links()
 
         self._move_nodes()
+        self.update_shortest_available_paths()
 
     def step(self):
         self.env_steps += 1

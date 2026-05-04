@@ -140,6 +140,12 @@ class EntanglementEnv(NetworkEnv):
         n_pseudo_targets: int = None,
         limit_flooding: bool = False,
         detailed_eval: bool = False,
+        reward_mode: str = "legacy",
+        reward_success_bonus: float = 2.0,
+        reward_path_found_bonus: float = 0.5,
+        reward_fidelity_weight: float = 1.0,
+        reward_latency_weight: float = 0.0,
+        reward_resource_weight: float = 0.0,
     ):
         """
         Initialize the environment.
@@ -154,6 +160,12 @@ class EntanglementEnv(NetworkEnv):
         super(EntanglementEnv, self).__init__()
 
         self.detailed_eval = detailed_eval
+        self.reward_mode = reward_mode
+        self.reward_success_bonus = reward_success_bonus
+        self.reward_path_found_bonus = reward_path_found_bonus
+        self.reward_fidelity_weight = reward_fidelity_weight
+        self.reward_latency_weight = reward_latency_weight
+        self.reward_resource_weight = reward_resource_weight
 
         self.env_id = 0
         self.n_envs = 1
@@ -264,6 +276,34 @@ class EntanglementEnv(NetworkEnv):
 
         self.eval_info_enabled = False
         self.debug_info_enabled = False
+
+    def _calculate_terminal_reward(
+        self,
+        request: LinkRequest,
+        reached_target: bool,
+        success: bool,
+        elapsed_steps: float,
+        resources: float,
+    ) -> float:
+        fidelity = request.link.fidelity if request.link is not None else 0
+
+        if self.reward_mode == "legacy":
+            if reached_target:
+                return max(fidelity, QuantumLink.FIDELITY_THRESHOLD)
+            return 0
+
+        if self.reward_mode != "time_fidelity":
+            raise ValueError(f"Unknown reward mode: {self.reward_mode}")
+
+        reward = 0.0
+        if reached_target:
+            reward += self.reward_path_found_bonus
+        if success:
+            reward += self.reward_success_bonus
+        reward += self.reward_fidelity_weight * fidelity
+        reward -= self.reward_latency_weight * elapsed_steps
+        reward -= self.reward_resource_weight * resources
+        return float(reward)
 
     def get_edge_cost(self, start, end):
         """
@@ -1123,10 +1163,13 @@ class EntanglementEnv(NetworkEnv):
                     self.network.nodes[request.target].entanglements.append(entanglement)
 
 
-                if request.now == request.target:
-                    reward[i] = max(request.link.fidelity if request.link is not None else 0, QuantumLink.FIDELITY_THRESHOLD)
-                else:
-                    reward[i] = 0
+                reward[i] = self._calculate_terminal_reward(
+                    request=request,
+                    reached_target=request.now == request.target,
+                    success=has_reached_target,
+                    elapsed_steps=self.agent_steps[i],
+                    resources=self.agent_resources[i],
+                )
 
                 self.done_metrics.reward += reward[i]
 
@@ -1171,6 +1214,7 @@ class EntanglementEnv(NetworkEnv):
                 self.reset_request(request, i)
 
         if done.sum() > 0 and not self.network.refresh_rate > 0:
+            self.network.update_shortest_available_paths()
             reachable = 0
             distances = []
             for i in range(self.n_requests):

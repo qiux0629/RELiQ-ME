@@ -109,3 +109,33 @@ from env.quantum_network import QuantumNetwork
 - 这个目录不依赖 `src/main.py`
 - 已经包含环境创建所需的代码与 fidelity 数据
 - 训练模型、策略网络、回放缓存等内容没有放进来
+
+## 一对多多体纠缠请求
+
+`create_env.py` 可以生成一对多请求并按“多个 target 同时路由 -> 中心等待 -> GHZ fusion -> 成功/失败”的流程输出结果：
+
+```bash
+python create_env.py \
+  --n-router 30 \
+  --n-data 2 \
+  --request-type multipartite \
+  --multipartite-targets 3 \
+  --center-strategy balanced \
+  --ghz-fusion-gate-fidelity 0.98 \
+  --ghz-fusion-success-probability 0.9 \
+  --reward-mode time_fidelity \
+  --reward-latency-weight 0.01 \
+  --reward-resource-weight 0.02
+```
+
+相关实现位于 `env/multipartite.py`，包含：
+
+- 请求生成：`source -> targets`
+- 中心节点策略：`balanced`、`median`、`minimax`、`min-latency`、`max-fidelity`、`random`
+- 时延拆分：采样、打包、经典传播、GNN 推理、Agent 决策、BSM、存储、GHZ fusion
+- 并发路由：source 和所有 target 到中心的路径同时建立，中心等待最慢路径
+- Fidelity：路径使用 RELiQ 的逐跳 noisy swap，GHZ fusion 再按 gate fidelity 引入 depolarizing noise
+- 成功判定：所有路径完成、GHZ fidelity 达到阈值，且 fusion 成功概率非零
+- GNN 特征：节点层与边层特征名、特征矩阵形状和 edge index 结构
+
+`EntanglementEnv.step` 也新增了可选 `time_fidelity` 奖励模式。默认仍为 `legacy`，不会改变原有实验行为。

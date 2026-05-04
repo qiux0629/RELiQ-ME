@@ -59,3 +59,52 @@ python standalone_quantum_env/create_env.py \
 - 红色方块：请求起点
 - 绿色三角：请求目标点
 - 橙色空心圆：当前 packet 位置
+
+## 多体纠缠规划与奖励模型
+
+当前代码支持两种多体相关模式：
+
+- `--request-type bipartite`：保留原 RELiQ 二体请求，再把二体端点集合拿去做多体规划评估
+- `--request-type multipartite`：生成真正的一对多请求 `source -> targets`，多个 target 同时路由，中心节点等待所有路径完成后执行 GHZ fusion
+
+一对多多体请求示例：
+
+```bash
+python standalone_quantum_env/create_env.py \
+  --n-router 30 \
+  --n-data 2 \
+  --request-type multipartite \
+  --multipartite-targets 3 \
+  --center-strategy balanced \
+  --ghz-fusion-gate-fidelity 0.98 \
+  --ghz-fusion-success-probability 0.9 \
+  --reward-mode time_fidelity \
+  --reward-latency-weight 0.01 \
+  --reward-resource-weight 0.02 \
+  --summary-json ./output/multipartite_summary.json
+```
+
+新增输出字段：
+
+- `multipartite_execution`：一对多请求、中心节点、并发路由、中心等待、GHZ fusion、成功/失败结果
+- `multipartite_plan`：兼容旧规划模式，选择出的中心节点、各终端到中心的路径、估计时延、保真度、成功概率和奖励
+- `multipartite_delay_model`：采样、打包、经典传播、GNN 推理、BSM、存储和 GHZ fusion 的时延参数
+- `multipartite_fidelity_model`：RELiQ-style fidelity 阈值、GHZ fusion gate fidelity 和 fusion 成功概率
+- `multipartite_reward_weights`：成功、路径可达、保真度、时延和资源消耗对应的奖励权重
+- `gnn_feature_package`：节点特征、边特征和 edge index 的形状及特征名，可直接作为 GNN 输入结构参考
+
+Fidelity 计算逻辑：
+
+- 单条路径使用 RELiQ 的逐跳 noisy swap：每经过一个中间节点，调用 `QuantumLink.get_swap_fidelity(f1, f2, gate_error)` 更新端到端 fidelity
+- 多体 GHZ 输入 fidelity 为所有 terminal-to-center 路径 fidelity 的乘积
+- GHZ fusion 后按 depolarizing gate 近似更新 fidelity，`--ghz-fusion-gate-fidelity` 越低，最终 `ghz_fidelity` 越低
+- 成功概率会乘上 `--ghz-fusion-success-probability`
+
+中心节点策略可选：
+
+- `balanced`：综合奖励最大
+- `median`：总跳数最小
+- `minimax`：最长终端路径最短
+- `min-latency`：估计总时延最小
+- `max-fidelity`：估计 GHZ 保真度最大
+- `random`：随机中心节点
