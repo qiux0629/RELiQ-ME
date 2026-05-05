@@ -16,6 +16,7 @@ os.chdir(BASE_DIR)
 
 from env.constants import EVAL_SEEDS
 from env.entanglementenv import EntanglementEnv
+from env.ghz_simulator import create_ghz_simulator
 from env.multipartite import (
     DelayModel,
     FidelityModel,
@@ -24,6 +25,7 @@ from env.multipartite import (
     execute_multipartite_request,
     generate_multipartite_request,
     plan_multipartite_entanglement,
+    plan_multipartite_entanglement_for_center,
 )
 from env.quantum_network import QuantumLink, QuantumNetwork
 from visualization import visualize_environment
@@ -344,9 +346,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--center-strategy",
-        choices=["balanced", "median", "minimax", "min-latency", "max-fidelity", "random"],
+        choices=["balanced", "median", "minimax", "min-latency", "max-fidelity", "random", "rl"],
         default="balanced",
         help="Center-node selection strategy for multipartite planning.",
+    )
+    parser.add_argument(
+        "--rl-policy-path",
+        type=Path,
+        default=None,
+        help="Checkpoint path for --center-strategy rl.",
+    )
+    parser.add_argument(
+        "--ghz-simulator",
+        choices=["auto", "qpanda", "numpy"],
+        default="auto",
+        help="GHZ simulation backend used by multipartite execution.",
+    )
+    parser.add_argument(
+        "--ghz-shots",
+        type=int,
+        default=1024,
+        help="Shots used by the GHZ simulation backend.",
+    )
+    parser.add_argument(
+        "--ghz-gate-noise",
+        type=float,
+        default=0.0,
+        help="Depolarizing noise probability applied to QPanda3 H/CNOT gates.",
+    )
+    parser.add_argument(
+        "--ghz-readout-error",
+        type=float,
+        default=0.0,
+        help="Readout bit-flip error probability applied by the QPanda3 noise model.",
     )
     parser.add_argument(
         "--delay-sample-time",
@@ -582,6 +614,43 @@ def build_fidelity_model(args: argparse.Namespace) -> FidelityModel:
     )
 
 
+def build_execution_simulator(args: argparse.Namespace, env: EntanglementEnv):
+    return create_ghz_simulator(
+        args.ghz_simulator,
+        shots=args.ghz_shots,
+        seed=int(env.network.current_topology_seed),
+        gate_noise=args.ghz_gate_noise,
+        readout_error=args.ghz_readout_error,
+    )
+
+
+def select_rl_center(args: argparse.Namespace, network, terminals: list[int]):
+    if args.rl_policy_path is None:
+        raise ValueError("--rl-policy-path is required when --center-strategy rl.")
+    if not args.rl_policy_path.exists():
+        raise FileNotFoundError(f"RL policy checkpoint not found: {args.rl_policy_path}")
+
+    from env.multipartite_rl import load_policy_checkpoint, select_center_with_policy
+
+    policy, metadata = load_policy_checkpoint(args.rl_policy_path)
+    selection = select_center_with_policy(policy, network, terminals)
+    return selection, metadata
+
+
+def add_rl_summary_fields(summary: dict, args: argparse.Namespace, selection, metadata: dict, execution=None) -> None:
+    summary["rl_policy"] = {
+        "path": str(args.rl_policy_path.resolve()) if args.rl_policy_path is not None else None,
+        "metadata": metadata,
+    }
+    summary["selected_center_q_value"] = float(selection.q_value)
+    summary["candidate_q_values"] = {
+        str(center): float(value)
+        for center, value in selection.candidate_q_values.items()
+    }
+    if execution is not None and execution.rl_reward is not None:
+        summary["rl_reward"] = float(execution.rl_reward)
+
+
 def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, summary: dict) -> None:
     delay_model = build_delay_model(args)
     reward_weights = build_reward_weights(args)
@@ -590,22 +659,42 @@ def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, sum
     if args.request_type == "multipartite":
         max_hops = args.multipartite_max_hop if args.multipartite_max_hop > 0 else None
         try:
+            ghz_simulator = build_execution_simulator(args, env)
             request = generate_multipartite_request(
                 env.network,
                 target_count=args.multipartite_targets,
                 request_id=0,
                 ttl=max_hops,
             )
-            execution = execute_multipartite_request(
-                env.network,
-                request,
-                center_strategy=args.center_strategy,
-                delay_model=delay_model,
-                reward_weights=reward_weights,
-                fidelity_model=fidelity_model,
-                max_hops=max_hops,
-            )
-        except ValueError as exc:
+            rl_selection = None
+            rl_metadata = {}
+            if args.center_strategy == "rl":
+                rl_selection, rl_metadata = select_rl_center(args, env.network, request.terminals)
+                execution = execute_multipartite_request(
+                    env.network,
+                    request,
+                    center_strategy="rl",
+                    delay_model=delay_model,
+                    reward_weights=reward_weights,
+                    fidelity_model=fidelity_model,
+                    max_hops=max_hops,
+                    center=rl_selection.center,
+                    ghz_simulator=ghz_simulator,
+                    use_rl_reward=True,
+                    selected_center_q_value=rl_selection.q_value,
+                )
+            else:
+                execution = execute_multipartite_request(
+                    env.network,
+                    request,
+                    center_strategy=args.center_strategy,
+                    delay_model=delay_model,
+                    reward_weights=reward_weights,
+                    fidelity_model=fidelity_model,
+                    max_hops=max_hops,
+                    ghz_simulator=ghz_simulator,
+                )
+        except (ValueError, RuntimeError, FileNotFoundError) as exc:
             summary["multipartite_execution_error"] = str(exc)
             return
 
@@ -617,6 +706,13 @@ def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, sum
         summary["multipartite_delay_model"] = delay_model.__dict__
         summary["multipartite_reward_weights"] = reward_weights.__dict__
         summary["multipartite_fidelity_model"] = fidelity_model.__dict__
+        summary["ghz_simulator_backend"] = (
+            execution.ghz_simulation.backend
+            if execution.ghz_simulation is not None
+            else ghz_simulator.name
+        )
+        if args.center_strategy == "rl" and rl_selection is not None:
+            add_rl_summary_fields(summary, args, rl_selection, rl_metadata, execution=execution)
         gnn_features = build_gnn_feature_package(
             env.network,
             terminals=request.terminals,
@@ -641,15 +737,28 @@ def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, sum
         return
 
     try:
-        plan = plan_multipartite_entanglement(
-            env.network,
-            terminals,
-            center_strategy=args.center_strategy,
-            delay_model=delay_model,
-            reward_weights=reward_weights,
-            fidelity_model=fidelity_model,
-        )
-    except ValueError as exc:
+        if args.center_strategy == "rl":
+            rl_selection, rl_metadata = select_rl_center(args, env.network, terminals)
+            plan = plan_multipartite_entanglement_for_center(
+                env.network,
+                terminals,
+                center=rl_selection.center,
+                center_strategy="rl",
+                delay_model=delay_model,
+                reward_weights=reward_weights,
+                fidelity_model=fidelity_model,
+            )
+            add_rl_summary_fields(summary, args, rl_selection, rl_metadata)
+        else:
+            plan = plan_multipartite_entanglement(
+                env.network,
+                terminals,
+                center_strategy=args.center_strategy,
+                delay_model=delay_model,
+                reward_weights=reward_weights,
+                fidelity_model=fidelity_model,
+            )
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
         summary["multipartite_plan_error"] = str(exc)
         return
 

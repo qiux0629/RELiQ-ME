@@ -108,7 +108,7 @@ from env.quantum_network import QuantumNetwork
 
 - 这个目录不依赖 `src/main.py`
 - 已经包含环境创建所需的代码与 fidelity 数据
-- 训练模型、策略网络、回放缓存等内容没有放进来
+- 基础环境不强制依赖训练框架；RL 中心选择需要额外安装 `requirements-rl.txt`
 
 ## 一对多多体纠缠请求
 
@@ -131,7 +131,7 @@ python create_env.py \
 相关实现位于 `env/multipartite.py`，包含：
 
 - 请求生成：`source -> targets`
-- 中心节点策略：`balanced`、`median`、`minimax`、`min-latency`、`max-fidelity`、`random`
+- 中心节点策略：`balanced`、`median`、`minimax`、`min-latency`、`max-fidelity`、`random`、`rl`
 - 时延拆分：采样、打包、经典传播、GNN 推理、Agent 决策、BSM、存储、GHZ fusion
 - 并发路由：source 和所有 target 到中心的路径同时建立，中心等待最慢路径
 - Fidelity：路径使用 RELiQ 的逐跳 noisy swap，GHZ fusion 再按 gate fidelity 引入 depolarizing noise
@@ -139,3 +139,38 @@ python create_env.py \
 - GNN 特征：节点层与边层特征名、特征矩阵形状和 edge index 结构
 
 `EntanglementEnv.step` 也新增了可选 `time_fidelity` 奖励模式。默认仍为 `legacy`，不会改变原有实验行为。
+
+## 强化学习中心节点选择
+
+安装可选依赖：
+
+```bash
+pip install -r requirements-rl.txt
+```
+
+训练 DQN/GNN 中心选择策略：
+
+```bash
+python train_multipartite_rl.py \
+  --episodes 100 \
+  --n-router 30 \
+  --multipartite-targets 3 \
+  --ghz-simulator auto \
+  --ghz-gate-noise 0.01 \
+  --checkpoint ./output/multipartite_rl.pt
+```
+
+使用 checkpoint 推理：
+
+```bash
+python create_env.py \
+  --request-type multipartite \
+  --center-strategy rl \
+  --rl-policy-path ./output/multipartite_rl.pt \
+  --ghz-simulator auto \
+  --ghz-gate-noise 0.01 \
+  --ghz-readout-error 0.005 \
+  --summary-json ./output/multipartite_rl_summary.json
+```
+
+`auto` 会优先尝试 QPanda3，未安装时回退到 numpy shots 模拟。QPanda3 后端使用 `NoiseModel + DensityMatrixSimulator` 建模 GHZ fusion 噪声，并在摘要中记录实际 `ghz_simulator_backend` 和噪声模拟细节。

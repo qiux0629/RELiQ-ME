@@ -108,3 +108,49 @@ Fidelity 计算逻辑：
 - `min-latency`：估计总时延最小
 - `max-fidelity`：估计 GHZ 保真度最大
 - `random`：随机中心节点
+- `rl`：加载 DQN/GNN checkpoint，在候选中心节点中选择动作
+
+## 强化学习中心节点选择
+
+安装基础依赖后，如需训练或使用 RL 中心选择策略，再安装：
+
+```bash
+pip install -r standalone_quantum_env/requirements-rl.txt
+```
+
+训练一个小规模 DQN checkpoint：
+
+```bash
+python standalone_quantum_env/train_multipartite_rl.py \
+  --episodes 100 \
+  --n-router 30 \
+  --multipartite-targets 3 \
+  --ghz-simulator auto \
+  --ghz-shots 1024 \
+  --checkpoint ./output/multipartite_rl.pt
+```
+
+使用训练后的策略进行多体请求评估：
+
+```bash
+python standalone_quantum_env/create_env.py \
+  --n-router 30 \
+  --n-data 2 \
+  --request-type multipartite \
+  --multipartite-targets 3 \
+  --center-strategy rl \
+  --rl-policy-path ./output/multipartite_rl.pt \
+  --ghz-simulator auto \
+  --ghz-shots 1024 \
+  --ghz-gate-noise 0.01 \
+  --ghz-readout-error 0.005 \
+  --summary-json ./output/multipartite_rl_summary.json
+```
+
+`--ghz-simulator auto` 会优先尝试 QPanda3；未安装 QPanda3 时自动回退到 numpy shots 模拟。QPanda3 后端使用 `NoiseModel + DensityMatrixSimulator`，通过 `--ghz-gate-noise` 给 H/CNOT 加 depolarizing noise，通过 `--ghz-readout-error` 配置读出错误。摘要中会输出 `ghz_simulator_backend`、`rl_policy`、`selected_center_q_value`、`rl_reward` 和噪声模拟细节。
+
+RL 奖励规则：
+
+- 成功生成完整 GHZ 态：奖励为完整 `ghz_fidelity`
+- 找到所有 terminal 到中心的路径但 GHZ 未成功：奖励为 `0.5 * ghz_input_fidelity`
+- 候选中心不可达：奖励为 `0`

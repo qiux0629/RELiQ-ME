@@ -6,6 +6,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import networkx as nx
 import numpy as np
 
+from env.ghz_simulator import GhzSimulatorBackend, GhzSimulationResult
 from env.quantum_network import QuantumLink
 
 
@@ -169,9 +170,12 @@ class MultipartiteExecution:
     success_probability: float
     success: bool
     failure_reason: Optional[str]
+    ghz_simulation: Optional[GhzSimulationResult] = None
+    rl_reward: Optional[float] = None
+    selected_center_q_value: Optional[float] = None
 
     def to_dict(self) -> Dict[str, object]:
-        return {
+        result = {
             "flow": [
                 "one_to_many_request_generation",
                 "concurrent_target_routing",
@@ -193,6 +197,14 @@ class MultipartiteExecution:
             "routes": [route.to_dict() for route in self.routes],
             "plan": self.plan.to_dict(),
         }
+        if self.ghz_simulation is not None:
+            result["ghz_simulation"] = self.ghz_simulation.to_dict()
+            result["ghz_simulator_backend"] = self.ghz_simulation.backend
+        if self.rl_reward is not None:
+            result["rl_reward"] = float(self.rl_reward)
+        if self.selected_center_q_value is not None:
+            result["selected_center_q_value"] = float(self.selected_center_q_value)
+        return result
 
 
 def _edge_for_nodes(network, start: int, end: int):
@@ -358,6 +370,27 @@ def _valid_centers(network, terminals: Sequence[int], candidates: Optional[Itera
     return centers
 
 
+def get_valid_center_candidates(
+    network,
+    terminals: Sequence[int],
+    candidates: Optional[Iterable[int]] = None,
+) -> List[int]:
+    return _valid_centers(network, terminals, candidates)
+
+
+def calculate_center_selection_reward(
+    path_found: bool,
+    ghz_success: bool,
+    ghz_input_fidelity: float,
+    ghz_fidelity: float,
+) -> float:
+    if not path_found:
+        return 0.0
+    if ghz_success:
+        return float(ghz_fidelity)
+    return float(0.5 * ghz_input_fidelity)
+
+
 def _score_plan(
     paths: Sequence[PathEstimate],
     center: int,
@@ -399,6 +432,82 @@ def _score_plan(
     return score, total_time, bottleneck_fidelity, ghz_input_fidelity, ghz_fidelity, total_hops
 
 
+def _build_multipartite_plan(
+    terminals: Sequence[int],
+    center: int,
+    center_strategy: str,
+    paths: Sequence[PathEstimate],
+    delay_model: DelayModel,
+    reward_weights: RewardWeights,
+    fidelity_model: FidelityModel,
+) -> MultipartitePlan:
+    total_time = max((path.total_time for path in paths), default=0.0) + delay_model.ghz_fusion_time
+    total_hops = sum(path.hop_count for path in paths)
+    path_fidelities = [path.fidelity for path in paths]
+    bottleneck_fidelity = min(path_fidelities, default=0.0)
+    ghz_input_fidelity, ghz_fidelity = estimate_ghz_fidelity(path_fidelities, fidelity_model)
+    success_probability = (
+        fidelity_model.ghz_fusion_success_probability
+        if bottleneck_fidelity >= fidelity_model.threshold and ghz_fidelity >= fidelity_model.threshold
+        else 0.0
+    )
+    reward = (
+        reward_weights.success_bonus * success_probability
+        + reward_weights.path_found_bonus
+        + reward_weights.fidelity_weight * ghz_fidelity
+        - reward_weights.latency_weight * total_time
+        - reward_weights.resource_weight * total_hops
+    )
+
+    return MultipartitePlan(
+        terminals=[int(node) for node in terminals],
+        center=int(center),
+        center_strategy=center_strategy,
+        paths=list(paths),
+        total_time=float(total_time),
+        total_hops=int(total_hops),
+        bottleneck_fidelity=float(bottleneck_fidelity),
+        ghz_input_fidelity=float(ghz_input_fidelity),
+        ghz_fidelity=float(ghz_fidelity),
+        fusion_gate_fidelity=float(fidelity_model.ghz_fusion_gate_fidelity),
+        fusion_success_probability=float(fidelity_model.ghz_fusion_success_probability),
+        success_probability=float(success_probability),
+        reward=float(reward),
+    )
+
+
+def plan_multipartite_entanglement_for_center(
+    network,
+    terminals: Sequence[int],
+    center: int,
+    center_strategy: str = "fixed",
+    delay_model: Optional[DelayModel] = None,
+    reward_weights: Optional[RewardWeights] = None,
+    fidelity_model: Optional[FidelityModel] = None,
+) -> MultipartitePlan:
+    if len(terminals) < 2:
+        raise ValueError("At least two terminals are required.")
+
+    delay_model = delay_model or DelayModel()
+    reward_weights = reward_weights or RewardWeights()
+    fidelity_model = fidelity_model or FidelityModel()
+    terminals = [int(node) for node in terminals]
+    center = int(center)
+    if center not in _valid_centers(network, terminals, [center]):
+        raise ValueError(f"Selected center {center} is not reachable from all terminals.")
+
+    paths = [estimate_path(network, terminal, center, delay_model) for terminal in terminals]
+    return _build_multipartite_plan(
+        terminals,
+        center,
+        center_strategy,
+        paths,
+        delay_model,
+        reward_weights,
+        fidelity_model,
+    )
+
+
 def plan_multipartite_entanglement(
     network,
     terminals: Sequence[int],
@@ -418,6 +527,8 @@ def plan_multipartite_entanglement(
     centers = _valid_centers(network, terminals, center_candidates)
     if not centers:
         raise ValueError("No reachable center candidate found for terminals.")
+    if center_strategy == "rl":
+        raise ValueError("RL center selection requires an explicit center from a policy checkpoint.")
 
     if center_strategy == "random":
         center = int(centers[network.topology_generator.integers(len(centers))])
@@ -439,38 +550,14 @@ def plan_multipartite_entanglement(
                 best = current
         _, _, center, paths, _, _, _, _, _ = best
 
-    total_time = max((path.total_time for path in paths), default=0.0) + delay_model.ghz_fusion_time
-    total_hops = sum(path.hop_count for path in paths)
-    path_fidelities = [path.fidelity for path in paths]
-    bottleneck_fidelity = min(path_fidelities, default=0.0)
-    ghz_input_fidelity, ghz_fidelity = estimate_ghz_fidelity(path_fidelities, fidelity_model)
-    success_probability = (
-        fidelity_model.ghz_fusion_success_probability
-        if bottleneck_fidelity >= fidelity_model.threshold and ghz_fidelity >= fidelity_model.threshold
-        else 0.0
-    )
-    reward = (
-        reward_weights.success_bonus * success_probability
-        + reward_weights.path_found_bonus
-        + reward_weights.fidelity_weight * ghz_fidelity
-        - reward_weights.latency_weight * total_time
-        - reward_weights.resource_weight * total_hops
-    )
-
-    return MultipartitePlan(
+    return _build_multipartite_plan(
         terminals=terminals,
-        center=int(center),
+        center=center,
         center_strategy=center_strategy,
         paths=paths,
-        total_time=float(total_time),
-        total_hops=int(total_hops),
-        bottleneck_fidelity=float(bottleneck_fidelity),
-        ghz_input_fidelity=float(ghz_input_fidelity),
-        ghz_fidelity=float(ghz_fidelity),
-        fusion_gate_fidelity=float(fidelity_model.ghz_fusion_gate_fidelity),
-        fusion_success_probability=float(fidelity_model.ghz_fusion_success_probability),
-        success_probability=float(success_probability),
-        reward=float(reward),
+        delay_model=delay_model,
+        reward_weights=reward_weights,
+        fidelity_model=fidelity_model,
     )
 
 
@@ -521,17 +608,33 @@ def execute_multipartite_request(
     reward_weights: Optional[RewardWeights] = None,
     fidelity_model: Optional[FidelityModel] = None,
     max_hops: Optional[int] = None,
+    center: Optional[int] = None,
+    ghz_simulator: Optional[GhzSimulatorBackend] = None,
+    use_rl_reward: bool = False,
+    selected_center_q_value: Optional[float] = None,
 ) -> MultipartiteExecution:
     delay_model = delay_model or DelayModel()
+    reward_weights = reward_weights or RewardWeights()
     fidelity_model = fidelity_model or FidelityModel()
-    plan = plan_multipartite_entanglement(
-        network,
-        request.terminals,
-        center_strategy=center_strategy,
-        delay_model=delay_model,
-        reward_weights=reward_weights,
-        fidelity_model=fidelity_model,
-    )
+    if center is None:
+        plan = plan_multipartite_entanglement(
+            network,
+            request.terminals,
+            center_strategy=center_strategy,
+            delay_model=delay_model,
+            reward_weights=reward_weights,
+            fidelity_model=fidelity_model,
+        )
+    else:
+        plan = plan_multipartite_entanglement_for_center(
+            network,
+            request.terminals,
+            center=center,
+            center_strategy=center_strategy,
+            delay_model=delay_model,
+            reward_weights=reward_weights,
+            fidelity_model=fidelity_model,
+        )
 
     routes: List[RouteExecution] = []
     for path_estimate in plan.paths:
@@ -571,10 +674,21 @@ def execute_multipartite_request(
     center_wait_time = max((route.total_time for route in routes), default=0.0)
     total_time = center_wait_time + delay_model.ghz_fusion_time
     all_routes_completed = all(route.completed for route in routes)
-    ghz_input_fidelity = plan.ghz_input_fidelity if all_routes_completed else 0.0
-    ghz_fidelity = plan.ghz_fidelity if all_routes_completed else 0.0
-    success_probability = plan.success_probability if all_routes_completed else 0.0
-    success = all_routes_completed and ghz_fidelity >= fidelity_model.threshold and success_probability > 0
+    ghz_simulation = None
+    if all_routes_completed and ghz_simulator is not None:
+        ghz_simulation = ghz_simulator.simulate(
+            [path.fidelity for path in plan.paths],
+            fidelity_model,
+        )
+        ghz_input_fidelity = ghz_simulation.ghz_input_fidelity
+        ghz_fidelity = ghz_simulation.ghz_fidelity
+        success_probability = ghz_simulation.success_probability
+        success = ghz_simulation.success
+    else:
+        ghz_input_fidelity = plan.ghz_input_fidelity if all_routes_completed else 0.0
+        ghz_fidelity = plan.ghz_fidelity if all_routes_completed else 0.0
+        success_probability = plan.success_probability if all_routes_completed else 0.0
+        success = all_routes_completed and ghz_fidelity >= fidelity_model.threshold and success_probability > 0
 
     failure_reason = None
     if not all_routes_completed:
@@ -585,6 +699,16 @@ def execute_multipartite_request(
             failure_reason = "ghz_fidelity_below_threshold"
         else:
             failure_reason = "ghz_fusion_success_probability_zero"
+    rl_reward = (
+        calculate_center_selection_reward(
+            path_found=True,
+            ghz_success=success,
+            ghz_input_fidelity=plan.ghz_input_fidelity,
+            ghz_fidelity=ghz_fidelity,
+        )
+        if use_rl_reward
+        else None
+    )
 
     return MultipartiteExecution(
         request=request,
@@ -598,6 +722,9 @@ def execute_multipartite_request(
         success_probability=float(success_probability),
         success=bool(success),
         failure_reason=failure_reason,
+        ghz_simulation=ghz_simulation,
+        rl_reward=rl_reward,
+        selected_center_q_value=selected_center_q_value,
     )
 
 

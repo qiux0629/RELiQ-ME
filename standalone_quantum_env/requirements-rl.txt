@@ -1,0 +1,7 @@
+# Install after requirements.txt when using RL center selection.
+torch
+pytest
+
+# Optional QPanda3 backend for --ghz-simulator qpanda.
+# Install manually if supported by your Python/platform:
+#   pip install pyqpanda3
