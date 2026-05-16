@@ -19,7 +19,9 @@ from env.entanglementenv import EntanglementEnv
 from env.multipartite import (
     DelayModel,
     FidelityModel,
+    PhysicalMemoryModel,
     RewardWeights,
+    StateCarvingGHZModel,
     build_gnn_feature_package,
     execute_multipartite_request,
     generate_multipartite_request,
@@ -337,6 +339,126 @@ def build_parser() -> argparse.ArgumentParser:
         help="Estimated probability that the final GHZ fusion operation succeeds.",
     )
     parser.add_argument(
+        "--ghz-establishment-mode",
+        choices=["prebuilt_ghz_distribution", "fusion_after_bipartite"],
+        default="prebuilt_ghz_distribution",
+        help="Multipartite GHZ construction mode. prebuilt_ghz_distribution follows the paper: local state-carving GHZ first, then RELiQ-style distribution.",
+    )
+    parser.add_argument(
+        "--state-carving-profile",
+        choices=["state_carving_2025_high_fidelity", "ideal"],
+        default="state_carving_2025_high_fidelity",
+        help="Local state-carving GHZ generation profile.",
+    )
+    parser.add_argument(
+        "--state-carving-success-probability",
+        type=float,
+        default=None,
+        help="Per-step local state-carving success probability. Sequential GHZ uses p^(N-1).",
+    )
+    parser.add_argument(
+        "--state-carving-fidelity",
+        type=float,
+        default=None,
+        help="Per-step local state-carving conditional fidelity.",
+    )
+    parser.add_argument(
+        "--state-carving-local-gate-fidelity",
+        type=float,
+        default=None,
+        help="Local gate fidelity used by sequential state-carving GHZ construction.",
+    )
+    parser.add_argument(
+        "--state-carving-generation-time",
+        type=float,
+        default=None,
+        help="Local GHZ generation time in step-equivalent units.",
+    )
+    parser.add_argument(
+        "--state-carving-construction",
+        choices=["sequential", "direct"],
+        default=None,
+        help="Local GHZ construction abstraction. sequential uses p^(N-1) and F^(N-1)G^(N-2); direct uses one aggregate step.",
+    )
+    parser.add_argument(
+        "--physical-profile",
+        choices=["single_atom_cavity_2015", "state_carving_2025_high_fidelity"],
+        default="single_atom_cavity_2015",
+        help="Physical memory parameter profile used by dynamic_physical backend.",
+    )
+    parser.add_argument(
+        "--memory-lifetime-seconds",
+        type=float,
+        default=None,
+        help="Override atomic memory lifetime in seconds.",
+    )
+    parser.add_argument(
+        "--photon-to-atom-success-probability",
+        type=float,
+        default=None,
+        help="Override photon-to-atom write success probability.",
+    )
+    parser.add_argument(
+        "--photon-to-atom-fidelity",
+        type=float,
+        default=None,
+        help="Override photon-to-atom write interface fidelity.",
+    )
+    parser.add_argument(
+        "--atom-to-photon-success-probability",
+        type=float,
+        default=None,
+        help="Override atom-to-photon readout success probability.",
+    )
+    parser.add_argument(
+        "--atom-to-photon-fidelity",
+        type=float,
+        default=None,
+        help="Override atom-to-photon readout interface fidelity.",
+    )
+    parser.add_argument(
+        "--max-write-attempts",
+        type=int,
+        default=None,
+        help="Maximum heralded photon-to-atom write attempts in dynamic_physical backend.",
+    )
+    parser.add_argument(
+        "--max-readout-attempts",
+        type=int,
+        default=None,
+        help="Maximum heralded atom-to-photon readout attempts in dynamic_physical backend.",
+    )
+    parser.add_argument(
+        "--memory-slots-per-node",
+        type=int,
+        default=None,
+        help="Atomic memory slots per center node. 0 means unlimited for this abstraction.",
+    )
+    parser.add_argument(
+        "--max-photonic-route-attempts",
+        type=int,
+        default=None,
+        help="Maximum full photonic terminal-to-center route attempts across routing/simple-path candidates before photon-to-atom write.",
+    )
+    parser.add_argument(
+        "--purification-rounds",
+        type=int,
+        default=None,
+        help="Optional purification rounds after readout in dynamic_physical backend.",
+    )
+    parser.add_argument(
+        "--purification-success-probability",
+        type=float,
+        default=None,
+        help="Per-round purification success probability.",
+    )
+    parser.add_argument(
+        "--purification-fidelity-gain",
+        type=float,
+        default=None,
+        help="Per-round fractional fidelity gain toward 1.0.",
+    )
+    parser.add_argument(
         "--multipartite-terminals",
         type=int,
         default=0,
@@ -582,10 +704,41 @@ def build_fidelity_model(args: argparse.Namespace) -> FidelityModel:
     )
 
 
+def build_state_carving_ghz_model(args: argparse.Namespace) -> StateCarvingGHZModel:
+    return StateCarvingGHZModel.from_profile(
+        args.state_carving_profile,
+        success_probability=args.state_carving_success_probability,
+        fidelity=args.state_carving_fidelity,
+        local_gate_fidelity=args.state_carving_local_gate_fidelity,
+        generation_time=args.state_carving_generation_time,
+        construction=args.state_carving_construction,
+    )
+
+
+def build_physical_memory_model(args: argparse.Namespace) -> PhysicalMemoryModel:
+    return PhysicalMemoryModel.from_profile(
+        args.physical_profile,
+        memory_lifetime_seconds=args.memory_lifetime_seconds,
+        photon_to_atom_success_probability=args.photon_to_atom_success_probability,
+        photon_to_atom_fidelity=args.photon_to_atom_fidelity,
+        atom_to_photon_success_probability=args.atom_to_photon_success_probability,
+        atom_to_photon_fidelity=args.atom_to_photon_fidelity,
+        max_write_attempts=args.max_write_attempts,
+        max_readout_attempts=args.max_readout_attempts,
+        memory_slots_per_node=args.memory_slots_per_node,
+        max_photonic_route_attempts=args.max_photonic_route_attempts,
+        purification_rounds=args.purification_rounds,
+        purification_success_probability=args.purification_success_probability,
+        purification_fidelity_gain=args.purification_fidelity_gain,
+    )
+
+
 def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, summary: dict) -> None:
     delay_model = build_delay_model(args)
     reward_weights = build_reward_weights(args)
     fidelity_model = build_fidelity_model(args)
+    state_carving_model = build_state_carving_ghz_model(args)
+    physical_memory_model = build_physical_memory_model(args)
 
     if args.request_type == "multipartite":
         max_hops = args.multipartite_max_hop if args.multipartite_max_hop > 0 else None
@@ -603,7 +756,10 @@ def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, sum
                 delay_model=delay_model,
                 reward_weights=reward_weights,
                 fidelity_model=fidelity_model,
+                ghz_establishment_mode=args.ghz_establishment_mode,
+                state_carving_model=state_carving_model,
                 max_hops=max_hops,
+                physical_memory_model=physical_memory_model,
             )
         except ValueError as exc:
             summary["multipartite_execution_error"] = str(exc)
@@ -617,6 +773,8 @@ def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, sum
         summary["multipartite_delay_model"] = delay_model.__dict__
         summary["multipartite_reward_weights"] = reward_weights.__dict__
         summary["multipartite_fidelity_model"] = fidelity_model.__dict__
+        summary["state_carving_ghz_model"] = state_carving_model.__dict__
+        summary["physical_memory_model"] = physical_memory_model.__dict__
         gnn_features = build_gnn_feature_package(
             env.network,
             terminals=request.terminals,
@@ -648,6 +806,8 @@ def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, sum
             delay_model=delay_model,
             reward_weights=reward_weights,
             fidelity_model=fidelity_model,
+            ghz_establishment_mode=args.ghz_establishment_mode,
+            state_carving_model=state_carving_model,
         )
     except ValueError as exc:
         summary["multipartite_plan_error"] = str(exc)
@@ -658,6 +818,7 @@ def add_multipartite_summary(args: argparse.Namespace, env: EntanglementEnv, sum
     summary["multipartite_delay_model"] = delay_model.__dict__
     summary["multipartite_reward_weights"] = reward_weights.__dict__
     summary["multipartite_fidelity_model"] = fidelity_model.__dict__
+    summary["state_carving_ghz_model"] = state_carving_model.__dict__
     summary["gnn_feature_package"] = {
         "node_features_shape": [int(v) for v in gnn_features["node_features"].shape],
         "edge_index_shape": [int(v) for v in gnn_features["edge_index"].shape],

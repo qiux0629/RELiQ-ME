@@ -1,6 +1,5 @@
 import copy
 import math
-import time
 from pathlib import Path
 from typing import List, Optional
 import numpy as np
@@ -9,7 +8,6 @@ import networkx as nx
 import topohub
 
 from matplotlib import colormaps
-import geopy.distance
 from enum import Enum
 import scipy
 

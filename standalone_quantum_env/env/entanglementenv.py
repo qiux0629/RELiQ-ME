@@ -1,6 +1,3 @@
-import copy
-import json
-import math
 import os.path
 import textwrap
 from enum import Enum
@@ -11,16 +8,15 @@ import base64
 
 import networkx as nx
 import numpy as np
-from collections import defaultdict
 
 from gymnasium.spaces import Discrete
 
-from env.environment import EnvironmentVariant, NetworkEnv
+from env.environment import NetworkEnv
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
-from env.quantum_network import QuantumNetwork, QuantumLink, QuantumRepeater, Entanglement, LinkReservation
+from env.quantum_network import QuantumNetwork, QuantumLink, Entanglement, LinkReservation
 from util import one_hot_list
 
 class Metrics:
@@ -309,9 +305,6 @@ class EntanglementEnv(NetworkEnv):
         """
         Retrieve the cost of the edge between the start and end nodes.
         """
-        edge = self.network.get_edge(start, end)
-        # Assuming the cost is the sum of the costs of the links within the edge
-
         return 1
 
     def set_figure_path(self, figure_path):
@@ -329,6 +322,11 @@ class EntanglementEnv(NetworkEnv):
 
     def _calculate_action_mask(self, request, index):
         self.action_mask[index] = 0
+
+        if request.edge != -1:
+            self.action_mask[index] = 1
+            self.action_mask[index, 0] = 0
+            return
 
         offset = 1
         if self.enable_fine_action_mask:
@@ -644,7 +642,6 @@ class EntanglementEnv(NetworkEnv):
         :return: node observations of shape (num_nodes, node_observation_size)
         """
         obs = []
-        requests = self.requests
 
         for j in range(self.network.n_nodes):
             if not self.request_based_observation:
@@ -998,8 +995,6 @@ class EntanglementEnv(NetworkEnv):
                         request.edge = t
                         request.time = 1
 
-                        old_position = request.now
-
                         # already set the next position
                         request.now = self.network.edges[t].get_other_node(request.now)
 
@@ -1089,7 +1084,6 @@ class EntanglementEnv(NetworkEnv):
                 if has_reached_target:
                     target[i] = True
 
-                try_count = 0
                 if self.end_swap_only:
                     if has_reached_target:
                         self.agent_resources[i] = 0
